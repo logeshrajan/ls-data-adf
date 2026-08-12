@@ -191,13 +191,13 @@ ADF Studio must be configured to use `main` as the collaboration branch. Develop
 
 ## Manual Re-deployment (workflow_dispatch)
 
-For emergency or ad-hoc deployments without raising a PR. Go to GitHub → Actions → **ADF CD Pipeline** → **Run workflow**, select the environment, and click Run.
+For emergency or ad-hoc deployments without raising a PR. Go to GitHub → Actions → **ADF Manual Deployment** → **Run workflow**, select the environment, and click Run.
 
 | Available environment | When to use |
 |---|---|
 | `sit` | Re-deploy to SIT without a code change (e.g., factory was manually modified) |
 | `uat` | Re-deploy to UAT before QA sign-off |
-| `prod` | Emergency re-deploy to PROD (approvals still enforced by environment rules) |
+| `prd` | Emergency re-deploy to PROD (approvals still enforced by environment rules) |
 | `dr` | DR testing on demand |
 
 `dev` is **not available** here — DEV is managed by ADF Studio Publish.
