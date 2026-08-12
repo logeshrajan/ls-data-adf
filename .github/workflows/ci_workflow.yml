@@ -1,5 +1,10 @@
 name: CI Workflow
 
+run-name: >-
+  ${{ github.event_name == 'pull_request'
+    && format('CI PR #{0} - {1}', github.event.pull_request.number, github.event.pull_request.title)
+    || format('CI - {0}', github.ref_name) }}
+
 on:
   pull_request:
     branches: [ "main" ]
@@ -10,11 +15,25 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ADF_RESOURCES_PATH: ./adf/adf_resources
+  ARM_OUTPUT_DIR: ./adf/adf_resources/armTemplate
+  ARM_TEMPLATE_JSON: ARMTemplateForFactory.json
+  ARM_PARAMETERS_JSON: ARMTemplateParametersForFactory.json
+  ARM_ARTIFACT_NAME: adf-arm-artifact
+
 jobs:
   ci:
-    runs-on: [self-hosted, Linux, X64, vmss-DataAI]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Check required folders
         shell: bash
         run: |
@@ -33,3 +52,61 @@ jobs:
 
             echo "Found required folder: $folder"
           done
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ADF utilities
+        run: npm install
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Export ARM template
+        shell: bash
+        env:
+          AZURE_DEV_SUBSCRIPTION_ID: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+          AZURE_DEV_RESOURCE_GROUP: ${{ vars.AZURE_DEV_RESOURCE_GROUP }}
+          AZURE_DEV_DATA_FACTORY: ${{ vars.AZURE_DEV_DATA_FACTORY }}
+        run: |
+          set -euo pipefail
+          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/$AZURE_DEV_RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$AZURE_DEV_DATA_FACTORY"
+
+          attempts=0
+          until [ "$attempts" -ge 3 ]; do
+            attempts=$((attempts + 1))
+            echo "Export attempt $attempts/3..."
+            if npm run build export \
+              "${{ github.workspace }}/${{ env.ADF_RESOURCES_PATH }}" \
+              "$adf_id" \
+              "armTemplate"; then
+              echo "ARM export completed."
+              break
+            fi
+            if [ "$attempts" -lt 3 ]; then
+              echo "Export failed on attempt $attempts. Retrying..."
+            else
+              echo "ERROR: ARM export failed after 3 attempts."
+              exit 1
+            fi
+          done
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Validate ARM output files
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_path="${{ env.ARM_OUTPUT_DIR }}/${{ env.ARM_TEMPLATE_JSON }}"
+          params_path="${{ env.ARM_OUTPUT_DIR }}/${{ env.ARM_PARAMETERS_JSON }}"
+          [ -f "$template_path" ] || { echo "ERROR: Missing $template_path"; exit 1; }
+          [ -f "$params_path" ] || { echo "ERROR: Missing $params_path"; exit 1; }
+          python3 adf/deploy/scripts/validate_arm_json.py "$template_path" "$params_path"
+
+      - name: Upload ARM artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARM_ARTIFACT_NAME }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+          if-no-files-found: error
+          retention-days: 30

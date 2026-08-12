@@ -44,7 +44,7 @@ Each `<env>.overrides.json` patches the ARM parameters for that environment.
 Minimum content (replace with actual factory name per env):
 ```json
 {
-  "factoryName": "mbb-adf-data-sit-myw-01"
+  "factoryName": "ls-sit-adf"
 }
 ```
 
@@ -63,24 +63,27 @@ These scripts are referenced in the pipeline. They must exist before the pipelin
 
 ## 2. Azure — App Registration + OIDC per Environment
 
-The pipeline uses OIDC (no stored secrets). You need one App Registration per environment.
+The pipeline uses OIDC (no stored secrets). You need **three** App Registrations — one each for SIT, UAT, and PROD.
 
-### For each environment (dev, sit, uat, prod):
+> DEV does **not** need an SPN. DEV is deployed via ADF Studio Publish and this pipeline never logs in to Azure for DEV. The only DEV value the pipeline uses is `AZURE_DEV_SUBSCRIPTION_ID` — a plain text string to construct the factory resource ID for the ARM export, no authentication involved.
+
+### For each of: sit, uat, prod
 
 **Step 1 — Create App Registration**
 1. Azure Portal → Microsoft Entra ID → App registrations → New registration
-2. Name: `github-adf-<env>` (e.g., `github-adf-sit`)
+2. Name: `ls-data-spn-tier4-<env>-myw-01` (e.g., `ls-data-spn-tier4-sit-myw-01`)
 3. Note down: **Application (client) ID** and **Directory (tenant) ID**
 
 **Step 2 — Add Federated Credential**
 1. Open the App Registration → Certificates & secrets → Federated credentials → Add credential
-2. Scenario: `GitHub Actions deploying Azure resources`
-3. Fill in:
-   - Organisation: `logeshrajan`
-   - Repository: `ls-data-adf`
-   - Entity type: `Environment`
-   - GitHub environment name: `sit` (or `uat`, `prod`, `dr`)
-4. Save
+2. Fill in the form:
+   - **Organization**: `logeshrajan`
+   - **Organization ID**: run `curl https://api.github.com/users/logeshrajan` → copy the `id` value
+   - **Repository**: `ls-data-adf`
+   - **Repository ID**: run `curl https://api.github.com/repos/logeshrajan/ls-data-adf` → copy the `id` value
+   - **Entity type**: `Environment`
+   - **GitHub environment name**: `sit` (repeat this step for `uat` and `prd` with their respective names)
+3. Save
 
 **Step 3 — Grant permissions on the ADF Resource Group**
 1. Azure Portal → Resource Groups → `mbb-rg-dataingestion-<env>-myw-01`
@@ -88,7 +91,7 @@ The pipeline uses OIDC (no stored secrets). You need one App Registration per en
 3. Role: `Contributor`
 4. Members: select the App Registration created in Step 1
 
-> **POC shortcut**: If you have a single ADF factory and want to test quickly, use the same App Registration and the same subscription/resource group values for all environments.
+> **POC shortcut**: One SPN with three federated credentials (one per GitHub environment: `sit`, `uat`, `prd`) pointing to the same subscription and resource group.
 
 ---
 
@@ -102,22 +105,29 @@ Go to: **Settings → Secrets and variables → Actions → Secrets → New repo
 |---|---|
 | `AZURE_TENANT_ID` | Your Azure Directory (tenant) ID |
 
-### Variables (one set per environment)
+### Variables
 
 Go to: **Settings → Secrets and variables → Actions → Variables → New repository variable**
 
-| Variable name | Value |
-|---|---|
-| `AZURE_SIT_SUBSCRIPTION_ID` | Azure subscription ID for SIT |
-| `AZURE_UAT_SUBSCRIPTION_ID` | Azure subscription ID for UAT |
-| `AZURE_PROD_SUBSCRIPTION_ID` | Azure subscription ID for PROD |
-| `AZURE_DEV_SUBSCRIPTION_ID` | Azure subscription ID for DEV (used only for ARM export) |
-| `AZURE_SIT_CLIENT_ID` | Application (client) ID of the SIT App Registration |
-| `AZURE_UAT_CLIENT_ID` | Application (client) ID of the UAT App Registration |
-| `AZURE_PROD_CLIENT_ID` | Application (client) ID of the PROD App Registration |
-| `AZURE_DEV_CLIENT_ID` | Application (client) ID of the DEV App Registration |
+| Variable name | Value | Notes |
+|---|---|---|
+| `AZURE_DEV_SUBSCRIPTION_ID` | Azure subscription ID for DEV | Used only to construct the factory resource ID for ARM export. No SPN or login needed. |
+| `AZURE_DEV_RESOURCE_GROUP` | Resource group name for DEV ADF | e.g. `rg-adf-cicd` |
+| `AZURE_DEV_DATA_FACTORY` | ADF factory name for DEV | e.g. `ls-dev-adf` |
+| `AZURE_SIT_SUBSCRIPTION_ID` | Azure subscription ID for SIT | |
+| `AZURE_SIT_RESOURCE_GROUP` | Resource group name for SIT ADF | |
+| `AZURE_SIT_DATA_FACTORY` | ADF factory name for SIT | |
+| `AZURE_UAT_SUBSCRIPTION_ID` | Azure subscription ID for UAT | |
+| `AZURE_UAT_RESOURCE_GROUP` | Resource group name for UAT ADF | |
+| `AZURE_UAT_DATA_FACTORY` | ADF factory name for UAT | |
+| `AZURE_PROD_SUBSCRIPTION_ID` | Azure subscription ID for PROD | |
+| `AZURE_PROD_RESOURCE_GROUP` | Resource group name for PROD ADF | |
+| `AZURE_PROD_DATA_FACTORY` | ADF factory name for PROD | |
+| `AZURE_SIT_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-sit-myw-01` | |
+| `AZURE_UAT_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-uat-myw-01` | |
+| `AZURE_PROD_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-prd-myw-01` | |
 
-> **POC shortcut**: You can set all four subscription IDs to the same value and all four client IDs to the same App Registration if you only have one ADF instance.
+> **POC shortcut**: Set all subscription IDs and resource group names to the same value if you only have one ADF instance.
 
 ---
 
@@ -133,7 +143,7 @@ Create these four environments:
 |---|---|---|
 | `sit` | SIT lead / tech lead | Add at least one reviewer |
 | `uat` | QA lead / business analyst | Add at least one reviewer |
-| `prod` | Release manager | Add at least one reviewer |
+| `prd` | Release manager | Add at least one reviewer |
 | `dr` | (optional) | No approval needed for DR testing |
 
 For each environment: add the required reviewer(s) under **Required reviewers**.
@@ -150,7 +160,7 @@ Enable:
 - [x] Require a pull request before merging
 - [x] Require approvals — set to **1**
 - [x] Dismiss stale pull request approvals when new commits are pushed
-- [x] Require branches to be up to date before merging
+- [ ] Require status checks to pass before merging *(optional for POC — enable this and then check "Require branches to be up to date before merging" inside it for production use)*
 - [x] Do not allow bypassing the above settings
 
 ---
@@ -196,10 +206,10 @@ Once all of the above is done:
 - [ ] `adf/adf_resources/package.json` created
 - [ ] Override files created for each env under `adf/deploy/overrides/`
 - [ ] Deploy scripts created under `adf/deploy/scripts/`
-- [ ] App Registration + federated credential created (at least for SIT)
+- [ ] App Registrations created: `ls-data-spn-tier4-sit-myw-01`, `ls-data-spn-tier4-uat-myw-01`, `ls-data-spn-tier4-prod-myw-01`
 - [ ] `AZURE_TENANT_ID` secret added to GitHub
 - [ ] Subscription ID and Client ID variables added to GitHub
-- [ ] GitHub environments created (`sit`, `uat`, `prod`)
+- [ ] GitHub environments created (`sit`, `uat`, `prd`)
 - [ ] Reviewer added to at least the `sit` environment
 - [ ] ADF Studio connected to this repo with `main` as collaboration branch
 - [ ] First PR raised and pipeline run started

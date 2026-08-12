@@ -1,5 +1,5 @@
 {
-	"name": "pl_aea",
+	"name": "pl_test_aea",
 	"properties": {
 		"activities": [
 			{
@@ -13,7 +13,7 @@
 			}
 		],
 		"folder": {
-			"name": "aea"
+			"name": "AEA"
 		},
 		"annotations": []
 	}
