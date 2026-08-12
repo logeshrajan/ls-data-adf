@@ -3,7 +3,7 @@ name: ADF CD Pipeline
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
     && format('Manual Deploy - {0}', inputs.environment_name)
-    || format('CD PR #{0} - {1}', github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.head_branch) }}
+    || format('CD - {0}', github.event.workflow_run.display_title) }}
 
 # -----------------------------------------------------------------------------
 # Triggers
