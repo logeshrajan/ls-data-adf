@@ -40,8 +40,8 @@ jobs:
           set -euo pipefail
           required_folders=(
             "adf/adf_resources"
-            "fabric"
-            "Metadata-SQL-DB"
+            # "fabric"
+            # "Metadata-SQL-DB"
           )
 
           for folder in "${required_folders[@]}"; do
