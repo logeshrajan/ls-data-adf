@@ -790,7 +790,7 @@ jobs:
         shell: bash
         run: |
           # Pipeline is the only entity that merges to main - never done manually.
-          gh pr merge "$PR_NUMBER" --auto --merge --delete-branch
+          gh pr merge "$PR_NUMBER" --auto --merge
 
 
   # ---------------------------------------------------------------------------
