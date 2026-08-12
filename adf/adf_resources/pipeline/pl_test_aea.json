@@ -1,0 +1,20 @@
+{
+	"name": "pl_test_aea",
+	"properties": {
+		"activities": [
+			{
+				"name": "Wait",
+				"type": "Wait",
+				"dependsOn": [],
+				"userProperties": [],
+				"typeProperties": {
+					"waitTimeInSeconds": 1
+				}
+			}
+		],
+		"folder": {
+			"name": "AEA"
+		},
+		"annotations": []
+	}
+}
