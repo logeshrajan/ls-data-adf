@@ -159,7 +159,7 @@ def main() -> int:
     with open(template_path, encoding="utf-8") as f:
         template_text = f.read()
 
-    with open(overrides_path, encoding="utf-8") as f:
+    with open(overrides_path, encoding="utf-8-sig") as f:
         raw_overrides = json.load(f)
 
     try:
