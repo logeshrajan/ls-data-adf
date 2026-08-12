@@ -56,6 +56,21 @@ GitHub pauses the run and notifies the configured reviewers. The approver goes t
 - **Approve** → deployment proceeds immediately
 - **Reject** → run fails cleanly. Developer pushes a fix to the same PR branch — the process restarts from CI.
 
+### PR approval versus environment approval
+
+These are separate controls:
+
+- **PR approval** is a code review. It must come from another authorized reviewer; the PR author cannot approve their own PR.
+- **Environment approval** authorizes deployment to SIT, UAT, or PROD. It does not satisfy the required PR code review.
+
+CI starts immediately when the PR is opened or updated. The recommended order is:
+
+```text
+PR opened -> CI succeeds -> PR approved by another reviewer -> SIT approval -> UAT approval -> PROD approval -> auto-merge
+```
+
+After PROD succeeds, the pipeline enables GitHub auto-merge. GitHub completes the merge only after all branch protection requirements, including the required PR approval and status checks, are satisfied.
+
 ---
 
 ## Rebase Rule — Required Before UAT
