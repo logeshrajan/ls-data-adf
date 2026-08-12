@@ -112,14 +112,22 @@ Go to: **Settings → Secrets and variables → Actions → Variables → New re
 | Variable name | Value | Notes |
 |---|---|---|
 | `AZURE_DEV_SUBSCRIPTION_ID` | Azure subscription ID for DEV | Used only to construct the factory resource ID for ARM export. No SPN or login needed. |
+| `AZURE_DEV_RESOURCE_GROUP` | Resource group name for DEV ADF | e.g. `rg-adf-cicd` |
+| `AZURE_DEV_DATA_FACTORY` | ADF factory name for DEV | e.g. `ls-dev-adf` |
 | `AZURE_SIT_SUBSCRIPTION_ID` | Azure subscription ID for SIT | |
+| `AZURE_SIT_RESOURCE_GROUP` | Resource group name for SIT ADF | |
+| `AZURE_SIT_DATA_FACTORY` | ADF factory name for SIT | |
 | `AZURE_UAT_SUBSCRIPTION_ID` | Azure subscription ID for UAT | |
+| `AZURE_UAT_RESOURCE_GROUP` | Resource group name for UAT ADF | |
+| `AZURE_UAT_DATA_FACTORY` | ADF factory name for UAT | |
 | `AZURE_PROD_SUBSCRIPTION_ID` | Azure subscription ID for PROD | |
+| `AZURE_PROD_RESOURCE_GROUP` | Resource group name for PROD ADF | |
+| `AZURE_PROD_DATA_FACTORY` | ADF factory name for PROD | |
 | `AZURE_SIT_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-sit-myw-01` | |
 | `AZURE_UAT_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-uat-myw-01` | |
-| `AZURE_PROD_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-prod-myw-01` | |
+| `AZURE_PROD_CLIENT_ID` | Application (client) ID of `ls-data-spn-tier4-prd-myw-01` | |
 
-> **POC shortcut**: Set all four subscription IDs to the same value and all three client IDs to the same SPN if you only have one ADF instance.
+> **POC shortcut**: Set all subscription IDs and resource group names to the same value if you only have one ADF instance.
 
 ---
 

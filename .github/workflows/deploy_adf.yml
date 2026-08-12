@@ -1,17 +1,17 @@
-﻿name: ADF CI/CD Pipeline
+name: ADF CI/CD Pipeline
 
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-    && format('Manual Deploy — {0}', inputs.environment_name)
-    || format('PR #{0} — {1}', github.event.pull_request.number, github.event.pull_request.title) }}
+    && format('Manual Deploy � {0}', inputs.environment_name)
+    || format('PR #{0} � {1}', github.event.pull_request.number, github.event.pull_request.title) }}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Triggers
-#   pull_request to main  →  SIT (approval)  →  UAT (approval)
-#                         →  PROD (approval)  →  auto-merge to main
-#   DEV is managed by ADF Studio Publish — not by this pipeline.
-#   workflow_dispatch     →  any environment including DR (manual, single-stage)
-# ─────────────────────────────────────────────────────────────────────────────
+#   pull_request to main  ?  SIT (approval)  ?  UAT (approval)
+#                         ?  PROD (approval)  ?  auto-merge to main
+#   DEV is managed by ADF Studio Publish � not by this pipeline.
+#   workflow_dispatch     ?  any environment including DR (manual, single-stage)
+# -----------------------------------------------------------------------------
 on:
   pull_request:
     branches:
@@ -45,12 +45,12 @@ env:
 
 jobs:
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  CI/CD — BUILD
+  # ---------------------------------------------------------------------------
+  #  CI/CD � BUILD
   #  Exports the ARM template once from the DEV factory definition.
-  #  SIT, UAT, and PROD all share this exact artifact — snapshot guarantee.
+  #  SIT, UAT, and PROD all share this exact artifact � snapshot guarantee.
   #  DEV is deployed separately via ADF Studio Publish, not by this pipeline.
-  # ═══════════════════════════════════════════════════════════════════════════
+  # ---------------------------------------------------------------------------
   build:
     name: Export ARM Template
     runs-on: ubuntu-latest
@@ -67,16 +67,18 @@ jobs:
         run: npm install
         working-directory: ${{ env.ADF_RESOURCES_PATH }}
 
-      - name: Export ARM template (source — DEV factory definition)
+      - name: Export ARM template (source � DEV factory definition)
         shell: bash
         env:
           AZURE_DEV_SUBSCRIPTION_ID: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+          AZURE_DEV_RESOURCE_GROUP: ${{ vars.AZURE_DEV_RESOURCE_GROUP }}
+          AZURE_DEV_DATA_FACTORY: ${{ vars.AZURE_DEV_DATA_FACTORY }}
         run: |
           set -euo pipefail
-          # ARM export reads local JSON files only — no Azure credentials required.
+          # ARM export reads local JSON files only � no Azure credentials required.
           # Per-environment values (factory name, IR names, etc.) are patched
           # by each deploy stage's override files at deployment time.
-          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/mbb-rg-dataingestion-dev-myw-01/providers/Microsoft.DataFactory/factories/ls-dev-adf"
+          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/$AZURE_DEV_RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$AZURE_DEV_DATA_FACTORY"
 
           attempts=0
           until [ "$attempts" -ge 3 ]; do
@@ -115,14 +117,14 @@ jobs:
           if-no-files-found: error
 
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  CI/CD — SIT  (approval gate)
+  # ---------------------------------------------------------------------------
+  #  CI/CD � SIT  (approval gate)
   #  SIT lead / tech lead must approve. Also verifies the branch is rebased
   #  onto the latest main before allowing entry to UAT.
   #  Queued globally: one PR in SIT at a time across all concurrent PRs.
-  # ═══════════════════════════════════════════════════════════════════════════
+  # ---------------------------------------------------------------------------
   deploy_sit:
-    name: Deploy — SIT
+    name: Deploy � SIT
     runs-on: ubuntu-latest
     needs: [build]
     if: github.event_name == 'pull_request'
@@ -134,6 +136,8 @@ jobs:
       ENVIRONMENT_NAME: sit
       SUBSCRIPTION_ID: ${{ vars.AZURE_SIT_SUBSCRIPTION_ID }}
       CLIENT_ID: ${{ vars.AZURE_SIT_CLIENT_ID }}
+      RESOURCE_GROUP: ${{ vars.AZURE_SIT_RESOURCE_GROUP }}
+      DATA_FACTORY: ${{ vars.AZURE_SIT_DATA_FACTORY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -149,14 +153,12 @@ jobs:
           set -euo pipefail
           env_name="$ENVIRONMENT_NAME"
           {
-            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
-            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
             echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
             echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
           } >> "$GITHUB_ENV"
           echo "Environment    : $env_name"
-          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
-          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+          echo "Resource group : $RESOURCE_GROUP"
+          echo "Data factory   : $DATA_FACTORY"
 
       - name: Validate environment config
         shell: bash
@@ -316,7 +318,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -344,14 +346,14 @@ jobs:
           done < "$restart_file"
 
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  CI/CD — UAT  (approval gate)
+  # ---------------------------------------------------------------------------
+  #  CI/CD � UAT  (approval gate)
   #  QA lead / business analyst must approve. Runs after SIT succeeds.
   #  Queued globally: only one PR in UAT at a time across all concurrent PRs.
   #  The SIT approver must confirm the branch is rebased before this runs.
-  # ═══════════════════════════════════════════════════════════════════════════
+  # ---------------------------------------------------------------------------
   deploy_uat:
-    name: Deploy — UAT
+    name: Deploy � UAT
     runs-on: ubuntu-latest
     needs: [deploy_sit]
     if: github.event_name == 'pull_request'
@@ -363,6 +365,8 @@ jobs:
       ENVIRONMENT_NAME: uat
       SUBSCRIPTION_ID: ${{ vars.AZURE_UAT_SUBSCRIPTION_ID }}
       CLIENT_ID: ${{ vars.AZURE_UAT_CLIENT_ID }}
+      RESOURCE_GROUP: ${{ vars.AZURE_UAT_RESOURCE_GROUP }}
+      DATA_FACTORY: ${{ vars.AZURE_UAT_DATA_FACTORY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -378,14 +382,12 @@ jobs:
           set -euo pipefail
           env_name="$ENVIRONMENT_NAME"
           {
-            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
-            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
             echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
             echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
           } >> "$GITHUB_ENV"
           echo "Environment    : $env_name"
-          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
-          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+          echo "Resource group : $RESOURCE_GROUP"
+          echo "Data factory   : $DATA_FACTORY"
 
       - name: Validate environment config
         shell: bash
@@ -545,7 +547,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -573,14 +575,14 @@ jobs:
           done < "$restart_file"
 
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  CI/CD — PROD  (approval gate)
+  # ---------------------------------------------------------------------------
+  #  CI/CD � PROD  (approval gate)
   #  Release manager must approve. Runs after UAT succeeds.
   #  Queued globally: never cancels a run that may be mid-deployment.
   #  Auto-merges the PR to main after a successful deployment.
-  # ═══════════════════════════════════════════════════════════════════════════
+  # ---------------------------------------------------------------------------
   deploy_prod:
-    name: Deploy — PROD
+    name: Deploy � PROD
     runs-on: ubuntu-latest
     needs: [deploy_uat]
     if: github.event_name == 'pull_request'
@@ -592,6 +594,8 @@ jobs:
       ENVIRONMENT_NAME: prd
       SUBSCRIPTION_ID: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      RESOURCE_GROUP: ${{ vars.AZURE_PROD_RESOURCE_GROUP }}
+      DATA_FACTORY: ${{ vars.AZURE_PROD_DATA_FACTORY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -607,14 +611,12 @@ jobs:
           set -euo pipefail
           env_name="$ENVIRONMENT_NAME"
           {
-            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
-            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
             echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
             echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
           } >> "$GITHUB_ENV"
           echo "Environment    : $env_name"
-          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
-          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+          echo "Resource group : $RESOURCE_GROUP"
+          echo "Data factory   : $DATA_FACTORY"
 
       - name: Validate environment config
         shell: bash
@@ -774,7 +776,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -807,20 +809,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Pipeline is the only entity that merges to main — never done manually.
+          # Pipeline is the only entity that merges to main � never done manually.
           gh pr merge ${{ github.event.pull_request.number }} --merge --delete-branch
 
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  MANUAL — workflow_dispatch
+  # ---------------------------------------------------------------------------
+  #  MANUAL � workflow_dispatch
   #  Deploys to any environment (including DR) on demand.
   #  Exports ARM template from the target environment's factory definition,
   #  then runs the full deploy pipeline in a single job.
   #  GitHub environment protection rules still apply: if prod or uat have
   #  required reviewers configured, approval is enforced even for manual runs.
-  # ═══════════════════════════════════════════════════════════════════════════
+  # ---------------------------------------------------------------------------
   deploy_manual:
-    name: "Manual Deploy — ${{ inputs.environment_name }}"
+    name: "Manual Deploy � ${{ inputs.environment_name }}"
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     environment: ${{ inputs.environment_name }}
@@ -841,6 +843,12 @@ jobs:
           AZURE_SIT_CLIENT_ID: ${{ vars.AZURE_SIT_CLIENT_ID }}
           AZURE_UAT_CLIENT_ID: ${{ vars.AZURE_UAT_CLIENT_ID }}
           AZURE_PROD_CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
+          AZURE_SIT_RESOURCE_GROUP: ${{ vars.AZURE_SIT_RESOURCE_GROUP }}
+          AZURE_SIT_DATA_FACTORY: ${{ vars.AZURE_SIT_DATA_FACTORY }}
+          AZURE_UAT_RESOURCE_GROUP: ${{ vars.AZURE_UAT_RESOURCE_GROUP }}
+          AZURE_UAT_DATA_FACTORY: ${{ vars.AZURE_UAT_DATA_FACTORY }}
+          AZURE_PROD_RESOURCE_GROUP: ${{ vars.AZURE_PROD_RESOURCE_GROUP }}
+          AZURE_PROD_DATA_FACTORY: ${{ vars.AZURE_PROD_DATA_FACTORY }}
         run: |
           set -euo pipefail
 
@@ -855,8 +863,8 @@ jobs:
             overrides_env="dr"
           fi
 
-          resource_group="mbb-rg-dataingestion-${infra_env}-myw-01"
-          data_factory="mbb-adf-data-${infra_env}-myw-01"
+          resource_group=""
+          data_factory=""
           env_overrides_file="./adf/deploy/overrides/${overrides_env}.overrides.json"
           env_template_overrides_file="./adf/deploy/overrides/${overrides_env}.template.overrides.json"
 
@@ -864,14 +872,20 @@ jobs:
             sit)
               subscription_id="$AZURE_SIT_SUBSCRIPTION_ID"
               client_id="$AZURE_SIT_CLIENT_ID"
+              resource_group="$AZURE_SIT_RESOURCE_GROUP"
+              data_factory="$AZURE_SIT_DATA_FACTORY"
               ;;
             uat)
               subscription_id="$AZURE_UAT_SUBSCRIPTION_ID"
               client_id="$AZURE_UAT_CLIENT_ID"
+              resource_group="$AZURE_UAT_RESOURCE_GROUP"
+              data_factory="$AZURE_UAT_DATA_FACTORY"
               ;;
             prd)
               subscription_id="$AZURE_PROD_SUBSCRIPTION_ID"
               client_id="$AZURE_PROD_CLIENT_ID"
+              resource_group="$AZURE_PROD_RESOURCE_GROUP"
+              data_factory="$AZURE_PROD_DATA_FACTORY"
               ;;
             *)
               echo "ERROR: Unsupported infra environment '$infra_env'."
