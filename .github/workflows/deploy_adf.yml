@@ -1,0 +1,1230 @@
+name: ADF CI/CD Pipeline
+
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+    && format('Manual Deploy — {0}', inputs.environment_name)
+    || format('PR #{0} — {1}', github.event.pull_request.number, github.event.pull_request.title) }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+#   pull_request to main  →  SIT (approval)  →  UAT (approval)
+#                         →  PROD (approval)  →  auto-merge to main
+#   DEV is managed by ADF Studio Publish — not by this pipeline.
+#   workflow_dispatch     →  any environment including DR (manual, single-stage)
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: "Deployment environment"
+        required: true
+        default: sit
+        type: choice
+        options:
+          - sit
+          - uat
+          - prod
+          - dr
+
+permissions:
+  id-token: write
+  contents: write      # required for auto-merge after PROD
+  pull-requests: write # required for auto-merge after PROD
+
+env:
+  ADF_RESOURCES_PATH: ./adf/adf_resources
+  TRIGGER_PATH: ./adf/adf_resources/trigger
+  ARM_OUTPUT_DIR: ./adf/adf_resources/armTemplate
+  ARM_TEMPLATE_JSON: ARMTemplateForFactory.json
+  ARM_PARAMETERS_JSON: ARMTemplateParametersForFactory.json
+  ARM_ARTIFACT_NAME: adf-arm-artifact
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  CI/CD — BUILD
+  #  Exports the ARM template once from the DEV factory definition.
+  #  SIT, UAT, and PROD all share this exact artifact — snapshot guarantee.
+  #  DEV is deployed separately via ADF Studio Publish, not by this pipeline.
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    name: Export ARM Template
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ADF utilities
+        run: npm install
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Export ARM template (source — DEV factory definition)
+        shell: bash
+        env:
+          AZURE_DEV_SUBSCRIPTION_ID: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          # ARM export reads local JSON files only — no Azure credentials required.
+          # Per-environment values (factory name, IR names, etc.) are patched
+          # by each deploy stage's override files at deployment time.
+          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/mbb-rg-dataingestion-dev-myw-01/providers/Microsoft.DataFactory/factories/mbb-adf-data-dev-myw-01"
+
+          attempts=0
+          until [ "$attempts" -ge 3 ]; do
+            attempts=$((attempts + 1))
+            echo "Export attempt $attempts/3..."
+            if npm run build export \
+              "${{ github.workspace }}/${{ env.ADF_RESOURCES_PATH }}" \
+              "$adf_id" \
+              "armTemplate"; then
+              echo "ARM export completed."
+              break
+            fi
+            if [ "$attempts" -lt 3 ]; then
+              echo "Export failed on attempt $attempts. Retrying..."
+            else
+              echo "ERROR: ARM export failed after 3 attempts."
+              exit 1
+            fi
+          done
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Validate ARM output files
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_path="${{ env.ARM_OUTPUT_DIR }}/${{ env.ARM_TEMPLATE_JSON }}"
+          params_path="${{ env.ARM_OUTPUT_DIR }}/${{ env.ARM_PARAMETERS_JSON }}"
+          [ -f "$template_path" ] || { echo "ERROR: Missing $template_path"; exit 1; }
+          [ -f "$params_path" ]   || { echo "ERROR: Missing $params_path";   exit 1; }
+
+      - name: Upload ARM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARM_ARTIFACT_NAME }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+          if-no-files-found: error
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  CI/CD — SIT  (approval gate)
+  #  SIT lead / tech lead must approve. Also verifies the branch is rebased
+  #  onto the latest main before allowing entry to UAT.
+  #  Queued globally: one PR in SIT at a time across all concurrent PRs.
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy_sit:
+    name: Deploy — SIT
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'pull_request'
+    environment: sit
+    concurrency:
+      group: adf-deploy-sit
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT_NAME: sit
+      SUBSCRIPTION_ID: ${{ vars.AZURE_SIT_SUBSCRIPTION_ID }}
+      CLIENT_ID: ${{ vars.AZURE_SIT_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ARM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARM_ARTIFACT_NAME }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+
+      - name: Resolve environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_name="$ENVIRONMENT_NAME"
+          {
+            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
+            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
+            echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
+            echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
+          } >> "$GITHUB_ENV"
+          echo "Environment    : $env_name"
+          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
+          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+
+      - name: Validate environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${SUBSCRIPTION_ID:-}" ] || { echo "ERROR: SUBSCRIPTION_ID is empty."; exit 1; }
+          [ -n "${CLIENT_ID:-}" ]       || { echo "ERROR: CLIENT_ID is empty.";       exit 1; }
+
+      - name: AZ OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+
+      - name: Capture trigger inventory from trigger folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          trigger_inventory_file="$RUNNER_TEMP/adf_trigger_inventory.tsv"
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          : > "$trigger_inventory_file"
+          : > "$restart_file"
+
+          if [ ! -d "$TRIGGER_PATH" ]; then
+            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+          fi
+
+          shopt -s nullglob
+          trigger_files=("$TRIGGER_PATH"/*.json)
+          if [ ${#trigger_files[@]} -eq 0 ]; then
+            echo "No trigger definition files found in $TRIGGER_PATH"
+          else
+            for trigger_file in "${trigger_files[@]}"; do
+              trigger_name=$(jq -r '.name // empty' "$trigger_file" 2>/dev/null || true)
+              [ -z "$trigger_name" ] && trigger_name=$(basename "$trigger_file" .json)
+              runtime_state=$(jq -r '.properties.runtimeState // "NotFound"' "$trigger_file" 2>/dev/null || true)
+              [ -z "$runtime_state" ] && runtime_state="NotFound"
+              printf '%s\t%s\n' "$trigger_name" "$runtime_state" >> "$trigger_inventory_file"
+              echo "Trigger inventory: $trigger_name => $runtime_state"
+              if [ "$runtime_state" = "Started" ]; then
+                echo "Trigger marked for restart: $trigger_name"
+                echo "$trigger_name" >> "$restart_file"
+              fi
+            done
+          fi
+
+          echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Stop started ADF triggers before deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          runtime_snapshot_file="$RUNNER_TEMP/adf_triggers_runtime_snapshot.json"
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          az rest --method get --url "$base/triggers?$api" -o json > "$runtime_snapshot_file"
+
+          if ! jq -e '.value[] | select(.properties.runtimeState == "Started")' "$runtime_snapshot_file" >/dev/null; then
+            echo "No started triggers found."
+          else
+            while IFS= read -r trigger_name; do
+              [ -z "$trigger_name" ] && continue
+              echo "Stopping trigger: $trigger_name"
+              az rest --method post --url "$base/triggers/$trigger_name/stop?$api" >/dev/null
+              grep -Fxq "$trigger_name" "$restart_file" 2>/dev/null || echo "$trigger_name" >> "$restart_file"
+            done < <(jq -r '.value[] | select(.properties.runtimeState == "Started") | .name' "$runtime_snapshot_file")
+          fi
+
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Ensure required integration runtimes exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+          ir_dir="${{ env.ADF_RESOURCES_PATH }}/integrationRuntime"
+
+          if [ ! -d "$ir_dir" ]; then
+            echo "No integrationRuntime folder ($ir_dir). Skipping."
+            exit 0
+          fi
+
+          shopt -s nullglob
+          for ir_file in "$ir_dir"/*.json; do
+            repo_name=$(jq -r '.name' "$ir_file")
+            env_name="$repo_name"
+            if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+              env_name=$(jq -r --arg n "$repo_name" '.[$n] // $n' "$ENV_TEMPLATE_OVERRIDES_FILE")
+            fi
+
+            echo "Checking IR: $env_name (source: $(basename "$ir_file"))"
+            exists=$(az rest --method get \
+              --url "$base/integrationRuntimes/$env_name?$api" \
+              --query "name" -o tsv 2>/dev/null || true)
+
+            if [ -n "$exists" ]; then
+              echo "  Already present. Skipping."
+            else
+              echo "  Missing. Creating: $env_name"
+              body_file="$RUNNER_TEMP/${env_name}.ir.json"
+              jq --arg n "$env_name" '{name: $n, properties: .properties}' "$ir_file" > "$body_file"
+              az rest --method put \
+                --url "$base/integrationRuntimes/$env_name?$api" \
+                --body "@$body_file" >/dev/null
+              echo "  Created: $env_name"
+            fi
+          done
+
+      - name: Deploy ARM template
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_file="${{ env.ARM_TEMPLATE_JSON }}"
+          parameter_file="${{ env.ARM_PARAMETERS_JSON }}"
+          az_parameter_file="az.parameters.json"
+
+          cp -a "${{ env.ARM_OUTPUT_DIR }}/." .
+
+          python3 adf/deploy/scripts/validate_arm_json.py "$template_file" "$parameter_file"
+          python3 adf/deploy/scripts/build_az_parameters_file.py "$parameter_file" "$az_parameter_file"
+
+          [ -f "$ENV_OVERRIDES_FILE" ] || { echo "ERROR: Missing $ENV_OVERRIDES_FILE"; exit 1; }
+          python3 adf/deploy/scripts/apply_az_parameter_overrides.py "$az_parameter_file" "$ENV_OVERRIDES_FILE"
+
+          if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+            python3 adf/deploy/scripts/apply_az_template_overrides.py "$template_file" "$ENV_TEMPLATE_OVERRIDES_FILE"
+          fi
+
+          before_count=$(jq '[.resources[] | select(.type == "Microsoft.DataFactory/factories/integrationRuntimes")] | length' "$template_file")
+          jq '
+            .resources |= (
+              map(select(.type != "Microsoft.DataFactory/factories/integrationRuntimes"))
+              | map(if has("dependsOn") then .dependsOn |= map(select(test("/integrationRuntimes/") | not)) else . end)
+            )
+          ' "$template_file" > "${template_file}.tmp" && mv "${template_file}.tmp" "$template_file"
+          echo "Removed $before_count integration-runtime resource(s)."
+
+          set +e
+          deploy_output=$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$template_file" \
+            --parameters "@$az_parameter_file" \
+            --output json 2>&1)
+          deploy_exit=$?
+          set -e
+          echo "$deploy_output"
+
+          if [ "$deploy_exit" -ne 0 ]; then
+            if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
+               echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
+               echo "$deploy_output" | grep -qi "already exist"; then
+              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+            else
+              echo "ERROR: Deployment failed."
+              exit "$deploy_exit"
+            fi
+          fi
+
+      - name: Restart previously started ADF triggers
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="${TRIGGERS_TO_RESTART_FILE:-}"
+          if [ -z "$restart_file" ] || [ ! -f "$restart_file" ] || [ ! -s "$restart_file" ]; then
+            echo "No triggers to restart."
+            exit 0
+          fi
+
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          while IFS= read -r trigger_name; do
+            [ -z "$trigger_name" ] && continue
+            echo "Starting trigger: $trigger_name"
+            az rest --method post --url "$base/triggers/$trigger_name/start?$api" >/dev/null
+          done < "$restart_file"
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  CI/CD — UAT  (approval gate)
+  #  QA lead / business analyst must approve. Runs after SIT succeeds.
+  #  Queued globally: only one PR in UAT at a time across all concurrent PRs.
+  #  The SIT approver must confirm the branch is rebased before this runs.
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy_uat:
+    name: Deploy — UAT
+    runs-on: ubuntu-latest
+    needs: [deploy_sit]
+    if: github.event_name == 'pull_request'
+    environment: uat
+    concurrency:
+      group: adf-deploy-uat
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT_NAME: uat
+      SUBSCRIPTION_ID: ${{ vars.AZURE_UAT_SUBSCRIPTION_ID }}
+      CLIENT_ID: ${{ vars.AZURE_UAT_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ARM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARM_ARTIFACT_NAME }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+
+      - name: Resolve environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_name="$ENVIRONMENT_NAME"
+          {
+            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
+            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
+            echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
+            echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
+          } >> "$GITHUB_ENV"
+          echo "Environment    : $env_name"
+          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
+          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+
+      - name: Validate environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${SUBSCRIPTION_ID:-}" ] || { echo "ERROR: SUBSCRIPTION_ID is empty."; exit 1; }
+          [ -n "${CLIENT_ID:-}" ]       || { echo "ERROR: CLIENT_ID is empty.";       exit 1; }
+
+      - name: AZ OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+
+      - name: Capture trigger inventory from trigger folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          trigger_inventory_file="$RUNNER_TEMP/adf_trigger_inventory.tsv"
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          : > "$trigger_inventory_file"
+          : > "$restart_file"
+
+          if [ ! -d "$TRIGGER_PATH" ]; then
+            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+          fi
+
+          shopt -s nullglob
+          trigger_files=("$TRIGGER_PATH"/*.json)
+          if [ ${#trigger_files[@]} -eq 0 ]; then
+            echo "No trigger definition files found in $TRIGGER_PATH"
+          else
+            for trigger_file in "${trigger_files[@]}"; do
+              trigger_name=$(jq -r '.name // empty' "$trigger_file" 2>/dev/null || true)
+              [ -z "$trigger_name" ] && trigger_name=$(basename "$trigger_file" .json)
+              runtime_state=$(jq -r '.properties.runtimeState // "NotFound"' "$trigger_file" 2>/dev/null || true)
+              [ -z "$runtime_state" ] && runtime_state="NotFound"
+              printf '%s\t%s\n' "$trigger_name" "$runtime_state" >> "$trigger_inventory_file"
+              echo "Trigger inventory: $trigger_name => $runtime_state"
+              if [ "$runtime_state" = "Started" ]; then
+                echo "Trigger marked for restart: $trigger_name"
+                echo "$trigger_name" >> "$restart_file"
+              fi
+            done
+          fi
+
+          echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Stop started ADF triggers before deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          runtime_snapshot_file="$RUNNER_TEMP/adf_triggers_runtime_snapshot.json"
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          az rest --method get --url "$base/triggers?$api" -o json > "$runtime_snapshot_file"
+
+          if ! jq -e '.value[] | select(.properties.runtimeState == "Started")' "$runtime_snapshot_file" >/dev/null; then
+            echo "No started triggers found."
+          else
+            while IFS= read -r trigger_name; do
+              [ -z "$trigger_name" ] && continue
+              echo "Stopping trigger: $trigger_name"
+              az rest --method post --url "$base/triggers/$trigger_name/stop?$api" >/dev/null
+              grep -Fxq "$trigger_name" "$restart_file" 2>/dev/null || echo "$trigger_name" >> "$restart_file"
+            done < <(jq -r '.value[] | select(.properties.runtimeState == "Started") | .name' "$runtime_snapshot_file")
+          fi
+
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Ensure required integration runtimes exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+          ir_dir="${{ env.ADF_RESOURCES_PATH }}/integrationRuntime"
+
+          if [ ! -d "$ir_dir" ]; then
+            echo "No integrationRuntime folder ($ir_dir). Skipping."
+            exit 0
+          fi
+
+          shopt -s nullglob
+          for ir_file in "$ir_dir"/*.json; do
+            repo_name=$(jq -r '.name' "$ir_file")
+            env_name="$repo_name"
+            if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+              env_name=$(jq -r --arg n "$repo_name" '.[$n] // $n' "$ENV_TEMPLATE_OVERRIDES_FILE")
+            fi
+
+            echo "Checking IR: $env_name (source: $(basename "$ir_file"))"
+            exists=$(az rest --method get \
+              --url "$base/integrationRuntimes/$env_name?$api" \
+              --query "name" -o tsv 2>/dev/null || true)
+
+            if [ -n "$exists" ]; then
+              echo "  Already present. Skipping."
+            else
+              echo "  Missing. Creating: $env_name"
+              body_file="$RUNNER_TEMP/${env_name}.ir.json"
+              jq --arg n "$env_name" '{name: $n, properties: .properties}' "$ir_file" > "$body_file"
+              az rest --method put \
+                --url "$base/integrationRuntimes/$env_name?$api" \
+                --body "@$body_file" >/dev/null
+              echo "  Created: $env_name"
+            fi
+          done
+
+      - name: Deploy ARM template
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_file="${{ env.ARM_TEMPLATE_JSON }}"
+          parameter_file="${{ env.ARM_PARAMETERS_JSON }}"
+          az_parameter_file="az.parameters.json"
+
+          cp -a "${{ env.ARM_OUTPUT_DIR }}/." .
+
+          python3 adf/deploy/scripts/validate_arm_json.py "$template_file" "$parameter_file"
+          python3 adf/deploy/scripts/build_az_parameters_file.py "$parameter_file" "$az_parameter_file"
+
+          [ -f "$ENV_OVERRIDES_FILE" ] || { echo "ERROR: Missing $ENV_OVERRIDES_FILE"; exit 1; }
+          python3 adf/deploy/scripts/apply_az_parameter_overrides.py "$az_parameter_file" "$ENV_OVERRIDES_FILE"
+
+          if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+            python3 adf/deploy/scripts/apply_az_template_overrides.py "$template_file" "$ENV_TEMPLATE_OVERRIDES_FILE"
+          fi
+
+          before_count=$(jq '[.resources[] | select(.type == "Microsoft.DataFactory/factories/integrationRuntimes")] | length' "$template_file")
+          jq '
+            .resources |= (
+              map(select(.type != "Microsoft.DataFactory/factories/integrationRuntimes"))
+              | map(if has("dependsOn") then .dependsOn |= map(select(test("/integrationRuntimes/") | not)) else . end)
+            )
+          ' "$template_file" > "${template_file}.tmp" && mv "${template_file}.tmp" "$template_file"
+          echo "Removed $before_count integration-runtime resource(s)."
+
+          set +e
+          deploy_output=$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$template_file" \
+            --parameters "@$az_parameter_file" \
+            --output json 2>&1)
+          deploy_exit=$?
+          set -e
+          echo "$deploy_output"
+
+          if [ "$deploy_exit" -ne 0 ]; then
+            if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
+               echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
+               echo "$deploy_output" | grep -qi "already exist"; then
+              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+            else
+              echo "ERROR: Deployment failed."
+              exit "$deploy_exit"
+            fi
+          fi
+
+      - name: Restart previously started ADF triggers
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="${TRIGGERS_TO_RESTART_FILE:-}"
+          if [ -z "$restart_file" ] || [ ! -f "$restart_file" ] || [ ! -s "$restart_file" ]; then
+            echo "No triggers to restart."
+            exit 0
+          fi
+
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          while IFS= read -r trigger_name; do
+            [ -z "$trigger_name" ] && continue
+            echo "Starting trigger: $trigger_name"
+            az rest --method post --url "$base/triggers/$trigger_name/start?$api" >/dev/null
+          done < "$restart_file"
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  CI/CD — PROD  (approval gate)
+  #  Release manager must approve. Runs after UAT succeeds.
+  #  Queued globally: never cancels a run that may be mid-deployment.
+  #  Auto-merges the PR to main after a successful deployment.
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy_prod:
+    name: Deploy — PROD
+    runs-on: ubuntu-latest
+    needs: [deploy_uat]
+    if: github.event_name == 'pull_request'
+    environment: prod
+    concurrency:
+      group: adf-deploy-prod
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT_NAME: prod
+      SUBSCRIPTION_ID: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+      CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ARM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARM_ARTIFACT_NAME }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+
+      - name: Resolve environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_name="$ENVIRONMENT_NAME"
+          {
+            echo "RESOURCE_GROUP=mbb-rg-dataingestion-${env_name}-myw-01"
+            echo "DATA_FACTORY=mbb-adf-data-${env_name}-myw-01"
+            echo "ENV_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.overrides.json"
+            echo "ENV_TEMPLATE_OVERRIDES_FILE=./adf/deploy/overrides/${env_name}.template.overrides.json"
+          } >> "$GITHUB_ENV"
+          echo "Environment    : $env_name"
+          echo "Resource group : mbb-rg-dataingestion-${env_name}-myw-01"
+          echo "Data factory   : mbb-adf-data-${env_name}-myw-01"
+
+      - name: Validate environment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${SUBSCRIPTION_ID:-}" ] || { echo "ERROR: SUBSCRIPTION_ID is empty."; exit 1; }
+          [ -n "${CLIENT_ID:-}" ]       || { echo "ERROR: CLIENT_ID is empty.";       exit 1; }
+
+      - name: AZ OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+
+      - name: Capture trigger inventory from trigger folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          trigger_inventory_file="$RUNNER_TEMP/adf_trigger_inventory.tsv"
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          : > "$trigger_inventory_file"
+          : > "$restart_file"
+
+          if [ ! -d "$TRIGGER_PATH" ]; then
+            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+          fi
+
+          shopt -s nullglob
+          trigger_files=("$TRIGGER_PATH"/*.json)
+          if [ ${#trigger_files[@]} -eq 0 ]; then
+            echo "No trigger definition files found in $TRIGGER_PATH"
+          else
+            for trigger_file in "${trigger_files[@]}"; do
+              trigger_name=$(jq -r '.name // empty' "$trigger_file" 2>/dev/null || true)
+              [ -z "$trigger_name" ] && trigger_name=$(basename "$trigger_file" .json)
+              runtime_state=$(jq -r '.properties.runtimeState // "NotFound"' "$trigger_file" 2>/dev/null || true)
+              [ -z "$runtime_state" ] && runtime_state="NotFound"
+              printf '%s\t%s\n' "$trigger_name" "$runtime_state" >> "$trigger_inventory_file"
+              echo "Trigger inventory: $trigger_name => $runtime_state"
+              if [ "$runtime_state" = "Started" ]; then
+                echo "Trigger marked for restart: $trigger_name"
+                echo "$trigger_name" >> "$restart_file"
+              fi
+            done
+          fi
+
+          echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Stop started ADF triggers before deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          runtime_snapshot_file="$RUNNER_TEMP/adf_triggers_runtime_snapshot.json"
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          az rest --method get --url "$base/triggers?$api" -o json > "$runtime_snapshot_file"
+
+          if ! jq -e '.value[] | select(.properties.runtimeState == "Started")' "$runtime_snapshot_file" >/dev/null; then
+            echo "No started triggers found."
+          else
+            while IFS= read -r trigger_name; do
+              [ -z "$trigger_name" ] && continue
+              echo "Stopping trigger: $trigger_name"
+              az rest --method post --url "$base/triggers/$trigger_name/stop?$api" >/dev/null
+              grep -Fxq "$trigger_name" "$restart_file" 2>/dev/null || echo "$trigger_name" >> "$restart_file"
+            done < <(jq -r '.value[] | select(.properties.runtimeState == "Started") | .name' "$runtime_snapshot_file")
+          fi
+
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Ensure required integration runtimes exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+          ir_dir="${{ env.ADF_RESOURCES_PATH }}/integrationRuntime"
+
+          if [ ! -d "$ir_dir" ]; then
+            echo "No integrationRuntime folder ($ir_dir). Skipping."
+            exit 0
+          fi
+
+          shopt -s nullglob
+          for ir_file in "$ir_dir"/*.json; do
+            repo_name=$(jq -r '.name' "$ir_file")
+            env_name="$repo_name"
+            if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+              env_name=$(jq -r --arg n "$repo_name" '.[$n] // $n' "$ENV_TEMPLATE_OVERRIDES_FILE")
+            fi
+
+            echo "Checking IR: $env_name (source: $(basename "$ir_file"))"
+            exists=$(az rest --method get \
+              --url "$base/integrationRuntimes/$env_name?$api" \
+              --query "name" -o tsv 2>/dev/null || true)
+
+            if [ -n "$exists" ]; then
+              echo "  Already present. Skipping."
+            else
+              echo "  Missing. Creating: $env_name"
+              body_file="$RUNNER_TEMP/${env_name}.ir.json"
+              jq --arg n "$env_name" '{name: $n, properties: .properties}' "$ir_file" > "$body_file"
+              az rest --method put \
+                --url "$base/integrationRuntimes/$env_name?$api" \
+                --body "@$body_file" >/dev/null
+              echo "  Created: $env_name"
+            fi
+          done
+
+      - name: Deploy ARM template
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_file="${{ env.ARM_TEMPLATE_JSON }}"
+          parameter_file="${{ env.ARM_PARAMETERS_JSON }}"
+          az_parameter_file="az.parameters.json"
+
+          cp -a "${{ env.ARM_OUTPUT_DIR }}/." .
+
+          python3 adf/deploy/scripts/validate_arm_json.py "$template_file" "$parameter_file"
+          python3 adf/deploy/scripts/build_az_parameters_file.py "$parameter_file" "$az_parameter_file"
+
+          [ -f "$ENV_OVERRIDES_FILE" ] || { echo "ERROR: Missing $ENV_OVERRIDES_FILE"; exit 1; }
+          python3 adf/deploy/scripts/apply_az_parameter_overrides.py "$az_parameter_file" "$ENV_OVERRIDES_FILE"
+
+          if [ -f "$ENV_TEMPLATE_OVERRIDES_FILE" ]; then
+            python3 adf/deploy/scripts/apply_az_template_overrides.py "$template_file" "$ENV_TEMPLATE_OVERRIDES_FILE"
+          fi
+
+          before_count=$(jq '[.resources[] | select(.type == "Microsoft.DataFactory/factories/integrationRuntimes")] | length' "$template_file")
+          jq '
+            .resources |= (
+              map(select(.type != "Microsoft.DataFactory/factories/integrationRuntimes"))
+              | map(if has("dependsOn") then .dependsOn |= map(select(test("/integrationRuntimes/") | not)) else . end)
+            )
+          ' "$template_file" > "${template_file}.tmp" && mv "${template_file}.tmp" "$template_file"
+          echo "Removed $before_count integration-runtime resource(s)."
+
+          set +e
+          deploy_output=$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$template_file" \
+            --parameters "@$az_parameter_file" \
+            --output json 2>&1)
+          deploy_exit=$?
+          set -e
+          echo "$deploy_output"
+
+          if [ "$deploy_exit" -ne 0 ]; then
+            if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
+               echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
+               echo "$deploy_output" | grep -qi "already exist"; then
+              echo "Warning: ManagedPrivateEndpoint already exists — ignoring idempotent error."
+            else
+              echo "ERROR: Deployment failed."
+              exit "$deploy_exit"
+            fi
+          fi
+
+      - name: Restart previously started ADF triggers
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="${TRIGGERS_TO_RESTART_FILE:-}"
+          if [ -z "$restart_file" ] || [ ! -f "$restart_file" ] || [ ! -s "$restart_file" ]; then
+            echo "No triggers to restart."
+            exit 0
+          fi
+
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          while IFS= read -r trigger_name; do
+            [ -z "$trigger_name" ] && continue
+            echo "Starting trigger: $trigger_name"
+            az rest --method post --url "$base/triggers/$trigger_name/start?$api" >/dev/null
+          done < "$restart_file"
+
+      - name: Auto-merge PR to main after PROD
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Pipeline is the only entity that merges to main — never done manually.
+          gh pr merge ${{ github.event.pull_request.number }} --merge --delete-branch
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  MANUAL — workflow_dispatch
+  #  Deploys to any environment (including DR) on demand.
+  #  Exports ARM template from the target environment's factory definition,
+  #  then runs the full deploy pipeline in a single job.
+  #  GitHub environment protection rules still apply: if prod or uat have
+  #  required reviewers configured, approval is enforced even for manual runs.
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy_manual:
+    name: "Manual Deploy — ${{ inputs.environment_name }}"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment: ${{ inputs.environment_name }}
+    env:
+      ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target environment mapping
+        id: resolve_env
+        shell: bash
+        env:
+          AZURE_DEV_SUBSCRIPTION_ID: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+          AZURE_SIT_SUBSCRIPTION_ID: ${{ vars.AZURE_SIT_SUBSCRIPTION_ID }}
+          AZURE_UAT_SUBSCRIPTION_ID: ${{ vars.AZURE_UAT_SUBSCRIPTION_ID }}
+          AZURE_PROD_SUBSCRIPTION_ID: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+          AZURE_DEV_CLIENT_ID: ${{ vars.AZURE_DEV_CLIENT_ID }}
+          AZURE_SIT_CLIENT_ID: ${{ vars.AZURE_SIT_CLIENT_ID }}
+          AZURE_UAT_CLIENT_ID: ${{ vars.AZURE_UAT_CLIENT_ID }}
+          AZURE_PROD_CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+
+          environment_name="${{ inputs.environment_name }}"
+          infra_env="$environment_name"
+          overrides_env="$environment_name"
+
+          # DR reuses SIT infra but keeps DR-specific override files.
+          # DR shares SIT infrastructure but uses its own override files.
+          if [ "$environment_name" = "dr" ]; then
+            infra_env="sit"
+            overrides_env="dr"
+          fi
+
+          resource_group="mbb-rg-dataingestion-${infra_env}-myw-01"
+          data_factory="mbb-adf-data-${infra_env}-myw-01"
+          env_overrides_file="./adf/deploy/overrides/${overrides_env}.overrides.json"
+          env_template_overrides_file="./adf/deploy/overrides/${overrides_env}.template.overrides.json"
+
+          case "$infra_env" in
+            dev)
+              subscription_id="$AZURE_DEV_SUBSCRIPTION_ID"
+              client_id="$AZURE_DEV_CLIENT_ID"
+              ;;
+            sit)
+              subscription_id="$AZURE_SIT_SUBSCRIPTION_ID"
+              client_id="$AZURE_SIT_CLIENT_ID"
+              ;;
+            uat)
+              subscription_id="$AZURE_UAT_SUBSCRIPTION_ID"
+              client_id="$AZURE_UAT_CLIENT_ID"
+              ;;
+            prod)
+              subscription_id="$AZURE_PROD_SUBSCRIPTION_ID"
+              client_id="$AZURE_PROD_CLIENT_ID"
+              ;;
+            *)
+              echo "ERROR: Unsupported infra environment '$infra_env'."
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "INFRA_ENVIRONMENT_NAME=$infra_env"
+            echo "OVERRIDES_ENVIRONMENT_NAME=$overrides_env"
+            echo "ENV_OVERRIDES_FILE=$env_overrides_file"
+            echo "ENV_TEMPLATE_OVERRIDES_FILE=$env_template_overrides_file"
+            echo "RESOURCE_GROUP=$resource_group"
+            echo "DATA_FACTORY=$data_factory"
+            echo "SUBSCRIPTION_ID=$subscription_id"
+            echo "CLIENT_ID=$client_id"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "subscription_id=$subscription_id"
+            echo "client_id=$client_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate environment mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUBSCRIPTION_ID:-}" ]; then
+            echo "ERROR: SUBSCRIPTION_ID resolved to empty for environment '$ENVIRONMENT_NAME'."
+            exit 1
+          fi
+
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "ERROR: CLIENT_ID resolved to empty for environment '$ENVIRONMENT_NAME'."
+            exit 1
+          fi
+
+          echo "Input environment         : $ENVIRONMENT_NAME"
+          echo "Infra environment target  : $INFRA_ENVIRONMENT_NAME"
+          echo "Overrides environment     : $OVERRIDES_ENVIRONMENT_NAME"
+          echo "ADF resource group        : $RESOURCE_GROUP"
+          echo "ADF factory               : $DATA_FACTORY"
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ADF utilities package
+        run: npm install
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Export ARM Template
+        shell: bash
+        run: |
+          set -euo pipefail
+          adf_id="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+
+          # Export can fail transiently if DNS/network to adf.azure.com is unstable; retry a few times.
+          attempts=0
+          until [ "$attempts" -ge 3 ]; do
+            attempts=$((attempts + 1))
+            echo "Export attempt $attempts/3..."
+
+            if npm run build export \
+              "${{ github.workspace }}/${{ env.ADF_RESOURCES_PATH }}" \
+              "$adf_id" \
+              "armTemplate"; then
+              echo "ARM export completed."
+              break
+            fi
+
+            if [ "$attempts" -lt 3 ]; then
+              echo "Export failed on attempt $attempts. Retrying..."
+            else
+              echo "ERROR: ARM export failed after 3 attempts."
+              exit 1
+            fi
+          done
+        working-directory: ${{ env.ADF_RESOURCES_PATH }}
+
+      - name: Validate ARM JSON filenames
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_dir="${{ env.ARM_OUTPUT_DIR }}"
+          template_path="$export_dir/${{ env.ARM_TEMPLATE_JSON }}"
+          params_path="$export_dir/${{ env.ARM_PARAMETERS_JSON }}"
+
+          echo "Validating expected ARM JSON filenames in: $export_dir"
+          [ -f "$template_path" ] || { echo "ERROR: Missing template file: $template_path"; exit 1; }
+          [ -f "$params_path" ] || { echo "ERROR: Missing parameters file: $params_path"; exit 1; }
+          echo "Found template file: $template_path"
+          echo "Found parameters file: $params_path"
+          echo "Generated parameters file content ($params_path):"
+          cat "$params_path"
+
+      - name: Publish ARM template
+        uses: actions/upload-artifact@v4
+        with:
+          name: adf-artifact-manual-${{ inputs.environment_name }}
+          path: ${{ env.ARM_OUTPUT_DIR }}
+          if-no-files-found: error
+
+      - name: Copy ARM template to root
+        shell: bash
+        run: cp -a "${{ env.ARM_OUTPUT_DIR }}/." .
+
+      - name: AZ OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ steps.resolve_env.outputs.client_id }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.resolve_env.outputs.subscription_id }}
+
+      - name: Capture trigger inventory from trigger folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          trigger_inventory_file="$RUNNER_TEMP/adf_trigger_inventory.tsv"
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          : > "$trigger_inventory_file"
+          : > "$restart_file"
+
+          if [ ! -d "$TRIGGER_PATH" ]; then
+            echo "Trigger folder not found: $TRIGGER_PATH"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          trigger_files=("$TRIGGER_PATH"/*.json)
+
+          if [ ${#trigger_files[@]} -eq 0 ]; then
+            echo "No trigger definition files found in $TRIGGER_PATH"
+          else
+            for trigger_file in "${trigger_files[@]}"; do
+              trigger_name=$(jq -r '.name // empty' "$trigger_file" 2>/dev/null || true)
+              if [ -z "$trigger_name" ]; then
+                trigger_name=$(basename "$trigger_file" .json)
+              fi
+
+              runtime_state=$(jq -r '.properties.runtimeState // "NotFound"' "$trigger_file" 2>/dev/null || true)
+
+              if [ -z "$runtime_state" ]; then
+                runtime_state="NotFound"
+              fi
+
+              printf '%s\t%s\n' "$trigger_name" "$runtime_state" >> "$trigger_inventory_file"
+              echo "Trigger inventory: $trigger_name => $runtime_state"
+
+              if [ "$runtime_state" = "Started" ]; then
+                echo "Trigger marked for restart: $trigger_name"
+                echo "$trigger_name" >> "$restart_file"
+              fi
+            done
+          fi
+
+          echo "Captured trigger inventory:"
+          cat "$trigger_inventory_file"
+
+          if [ -s "$restart_file" ]; then
+            echo "Triggers marked for restart:"
+            cat "$restart_file"
+          else
+            echo "No triggers are in Started state."
+          fi
+
+          echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+      - name: Stop started ADF triggers before deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="$RUNNER_TEMP/adf_triggers_to_restart.txt"
+          runtime_snapshot_file="$RUNNER_TEMP/adf_triggers_runtime_snapshot.json"
+
+          sub_id="$SUBSCRIPTION_ID"
+          rg="$RESOURCE_GROUP"
+          df="$DATA_FACTORY"
+          base="https://management.azure.com/subscriptions/$sub_id/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df"
+          api="api-version=2018-06-01"
+
+          echo "Finding started triggers in $DATA_FACTORY..."
+          az rest --method get --url "$base/triggers?$api" -o json > "$runtime_snapshot_file"
+
+          if ! jq -e '.value[] | select(.properties.runtimeState == "Started")' "$runtime_snapshot_file" >/dev/null; then
+            echo "No started triggers found."
+          else
+            while IFS= read -r trigger_name; do
+              [ -z "$trigger_name" ] && continue
+              echo "Stopping trigger: $trigger_name"
+              az rest --method post --url "$base/triggers/$trigger_name/stop?$api" >/dev/null
+              if ! grep -Fxq "$trigger_name" "$restart_file" 2>/dev/null; then
+                echo "$trigger_name" >> "$restart_file"
+              fi
+            done < <(jq -r '.value[] | select(.properties.runtimeState == "Started") | .name' "$runtime_snapshot_file")
+          fi
+
+          echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+
+          if [ -s "$restart_file" ]; then
+            restart_count=$(wc -l < "$restart_file")
+            echo "All triggers in restart list ($restart_count):"
+            cat "$restart_file"
+          else
+            echo "All triggers in restart list: none"
+          fi
+
+      - name: Ensure required integration runtimes exist in target factory
+        shell: bash
+        run: |
+          set -euo pipefail
+          sub_id="$SUBSCRIPTION_ID"
+          rg="$RESOURCE_GROUP"
+          df="$DATA_FACTORY"
+          base="https://management.azure.com/subscriptions/$sub_id/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df"
+          api="api-version=2018-06-01"
+
+          ir_dir="${{ env.ADF_RESOURCES_PATH }}/integrationRuntime"
+          overrides_file="$ENV_TEMPLATE_OVERRIDES_FILE"
+
+          if [ ! -d "$ir_dir" ]; then
+            echo "No integration runtime folder ($ir_dir). Nothing to ensure."
+            exit 0
+          fi
+
+          shopt -s nullglob
+          for ir_file in "$ir_dir"/*.json; do
+            repo_name=$(jq -r '.name' "$ir_file")
+
+            # Resolve the per-environment IR name using the env template overrides
+            # (same mapping used to rewrite the ARM template). Falls back to the
+            # repo name if no mapping is defined for this env.
+            if [ -f "$overrides_file" ]; then
+              env_name=$(jq -r --arg n "$repo_name" '.[$n] // $n' "$overrides_file")
+            else
+              env_name="$repo_name"
+            fi
+
+            echo "Checking integration runtime: $env_name (source: $(basename "$ir_file"))"
+            exists=$(az rest --method get \
+              --url "$base/integrationRuntimes/$env_name?$api" \
+              --query "name" -o tsv 2>/dev/null || true)
+
+            if [ -n "$exists" ]; then
+              echo "  Already present in $DATA_FACTORY. Skipping."
+              continue
+            fi
+
+            echo "  Missing. Creating from repo definition with name '$env_name'..."
+            body_file="$RUNNER_TEMP/${env_name}.ir.json"
+            jq --arg n "$env_name" '{name: $n, properties: .properties}' "$ir_file" > "$body_file"
+            az rest --method put \
+              --url "$base/integrationRuntimes/$env_name?$api" \
+              --body "@$body_file" >/dev/null
+            echo "  Created: $env_name"
+          done
+
+      - name: Deploy resources with Azure CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_file="${{ env.ARM_TEMPLATE_JSON }}"
+          parameter_file="${{ env.ARM_PARAMETERS_JSON }}"
+          az_parameter_file="az.parameters.json"
+
+          echo "Validating JSON structure of ARM files..."
+          python3 adf/deploy/scripts/validate_arm_json.py \
+            "$template_file" "$parameter_file"
+
+          echo "Building Azure CLI parameter file..."
+          python3 adf/deploy/scripts/build_az_parameters_file.py \
+            "$parameter_file" "$az_parameter_file"
+
+          overrides_file="$ENV_OVERRIDES_FILE"
+          if [ ! -f "$overrides_file" ]; then
+            echo "ERROR: Missing environment overrides file: $overrides_file"
+            exit 1
+          fi
+
+          echo "Applying environment overrides to deployment file only: $overrides_file"
+          python3 adf/deploy/scripts/apply_az_parameter_overrides.py \
+            "$az_parameter_file" "$overrides_file"
+
+          template_overrides_file="$ENV_TEMPLATE_OVERRIDES_FILE"
+          if [ -f "$template_overrides_file" ]; then
+            echo "Applying environment overrides to ARM template: $template_overrides_file"
+            python3 adf/deploy/scripts/apply_az_template_overrides.py \
+              "$template_file" "$template_overrides_file"
+          else
+            echo "No template overrides file found ($template_overrides_file). Skipping template overrides."
+          fi
+
+          echo "Stripping integration-runtime resources from ARM template (IRs are managed manually per environment)..."
+          before_count=$(jq '[.resources[] | select(.type == "Microsoft.DataFactory/factories/integrationRuntimes")] | length' "$template_file")
+          tmp_template="${template_file}.noir.json"
+          jq '
+            .resources |= (
+              map(select(.type != "Microsoft.DataFactory/factories/integrationRuntimes"))
+              | map(
+                  if has("dependsOn")
+                  then .dependsOn |= map(select(test("/integrationRuntimes/") | not))
+                  else . end
+                )
+            )
+          ' "$template_file" > "$tmp_template"
+          mv "$tmp_template" "$template_file"
+          echo "Removed $before_count integration-runtime resource(s) from the ARM template."
+
+          echo "Deployment parameters file used by Azure CLI: $az_parameter_file"
+          cat "$az_parameter_file"
+
+          echo "ARM template file used by Azure CLI: $template_file"
+          cat "$template_file"
+
+          echo "Creating ARM deployment with Azure CLI..."
+          set +e
+          deploy_output=$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$template_file" \
+            --parameters "@$az_parameter_file" \
+            --output json 2>&1)
+          deploy_exit=$?
+          set -e
+
+          echo "$deploy_output"
+
+          if [ "$deploy_exit" -ne 0 ]; then
+            if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
+               echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
+               echo "$deploy_output" | grep -qi "already exist"; then
+              echo "Warning: ManagedPrivateEndpoint already exists. Ignoring this idempotent deployment error."
+            else
+              echo "ERROR: Azure deployment failed with a non-ignorable error."
+              exit "$deploy_exit"
+            fi
+          fi
+
+      - name: Restart previously started ADF triggers
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          restart_file="${TRIGGERS_TO_RESTART_FILE:-}"
+          if [ -z "$restart_file" ] || [ ! -f "$restart_file" ] || [ ! -s "$restart_file" ]; then
+            echo "No triggers to restart."
+            exit 0
+          fi
+
+          base="https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DATA_FACTORY"
+          api="api-version=2018-06-01"
+
+          while IFS= read -r trigger_name; do
+            [ -z "$trigger_name" ] && continue
+            echo "Starting trigger: $trigger_name"
+            az rest --method post --url "$base/triggers/$trigger_name/start?$api" >/dev/null
+          done < "$restart_file"
+

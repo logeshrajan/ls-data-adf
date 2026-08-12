@@ -1,0 +1,20 @@
+{
+	"name": "pl_aea",
+	"properties": {
+		"activities": [
+			{
+				"name": "Wait",
+				"type": "Wait",
+				"dependsOn": [],
+				"userProperties": [],
+				"typeProperties": {
+					"waitTimeInSeconds": 1
+				}
+			}
+		],
+		"folder": {
+			"name": "aea"
+		},
+		"annotations": []
+	}
+}
