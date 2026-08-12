@@ -1,4 +1,4 @@
-name: ADF CI/CD Pipeline
+﻿name: ADF CI/CD Pipeline
 
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
@@ -182,7 +182,10 @@ jobs:
           : > "$restart_file"
 
           if [ ! -d "$TRIGGER_PATH" ]; then
-            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+            echo "No trigger folder at $TRIGGER_PATH -- skipping trigger management."
+            echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+            echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           shopt -s nullglob
@@ -408,7 +411,10 @@ jobs:
           : > "$restart_file"
 
           if [ ! -d "$TRIGGER_PATH" ]; then
-            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+            echo "No trigger folder at $TRIGGER_PATH -- skipping trigger management."
+            echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+            echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           shopt -s nullglob
@@ -634,7 +640,10 @@ jobs:
           : > "$restart_file"
 
           if [ ! -d "$TRIGGER_PATH" ]; then
-            echo "Trigger folder not found: $TRIGGER_PATH"; exit 1
+            echo "No trigger folder at $TRIGGER_PATH -- skipping trigger management."
+            echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+            echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           shopt -s nullglob
@@ -989,8 +998,10 @@ jobs:
           : > "$restart_file"
 
           if [ ! -d "$TRIGGER_PATH" ]; then
-            echo "Trigger folder not found: $TRIGGER_PATH"
-            exit 1
+            echo "No trigger folder at $TRIGGER_PATH -- skipping trigger management."
+            echo "TRIGGER_INVENTORY_FILE=$trigger_inventory_file" >> "$GITHUB_ENV"
+            echo "TRIGGERS_TO_RESTART_FILE=$restart_file" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           shopt -s nullglob
@@ -1222,4 +1233,5 @@ jobs:
             echo "Starting trigger: $trigger_name"
             az rest --method post --url "$base/triggers/$trigger_name/start?$api" >/dev/null
           done < "$restart_file"
+
 
