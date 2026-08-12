@@ -1,0 +1,8 @@
+{
+  "factoryName": "ls-uat-adf",
+  "ls_keyvault_properties_typeProperties_baseUrl": "https://mbb-kv-data-uat-myw-01.vault.azure.net/",
+  "ls_sqldb_config_properties_typeProperties_server": "mbb-sql-data-uat-myw-01.database.windows.net",
+  "ls_sqldb_config_properties_typeProperties_database": "mbb-sqldb-data-uat-myw-01",
+  "TRG_NEW_AEA_FILE_properties_typeProperties_scope": "/subscriptions/7b791bb0-d1f4-4b81-bea9-ee0629690f4a/resourceGroups/mbb-rg-datastorage-uat-myw-01/providers/Microsoft.Storage/storageAccounts/mbbsaadlsdatauatmyw01",
+  "TRG_CFS_FILE_INGESTION_properties_typeProperties_scope": "/subscriptions/7b791bb0-d1f4-4b81-bea9-ee0629690f4a/resourceGroups/mbb-rg-datastorage-uat-myw-01/providers/Microsoft.Storage/storageAccounts/mbbsaadlsdatauatmyw01"
+}

@@ -27,7 +27,7 @@ on:
         options:
           - sit
           - uat
-          - prod
+          - prd
           - dr
 
 permissions:
@@ -76,7 +76,7 @@ jobs:
           # ARM export reads local JSON files only — no Azure credentials required.
           # Per-environment values (factory name, IR names, etc.) are patched
           # by each deploy stage's override files at deployment time.
-          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/mbb-rg-dataingestion-dev-myw-01/providers/Microsoft.DataFactory/factories/mbb-adf-data-dev-myw-01"
+          adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/mbb-rg-dataingestion-dev-myw-01/providers/Microsoft.DataFactory/factories/ls-dev-adf"
 
           attempts=0
           until [ "$attempts" -ge 3 ]; do
@@ -578,12 +578,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [deploy_uat]
     if: github.event_name == 'pull_request'
-    environment: prod
+    environment: prd
     concurrency:
-      group: adf-deploy-prod
+      group: adf-deploy-prd
       cancel-in-progress: false
     env:
-      ENVIRONMENT_NAME: prod
+      ENVIRONMENT_NAME: prd
       SUBSCRIPTION_ID: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
     steps:
@@ -829,7 +829,6 @@ jobs:
           AZURE_SIT_SUBSCRIPTION_ID: ${{ vars.AZURE_SIT_SUBSCRIPTION_ID }}
           AZURE_UAT_SUBSCRIPTION_ID: ${{ vars.AZURE_UAT_SUBSCRIPTION_ID }}
           AZURE_PROD_SUBSCRIPTION_ID: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
-          AZURE_DEV_CLIENT_ID: ${{ vars.AZURE_DEV_CLIENT_ID }}
           AZURE_SIT_CLIENT_ID: ${{ vars.AZURE_SIT_CLIENT_ID }}
           AZURE_UAT_CLIENT_ID: ${{ vars.AZURE_UAT_CLIENT_ID }}
           AZURE_PROD_CLIENT_ID: ${{ vars.AZURE_PROD_CLIENT_ID }}
@@ -853,10 +852,6 @@ jobs:
           env_template_overrides_file="./adf/deploy/overrides/${overrides_env}.template.overrides.json"
 
           case "$infra_env" in
-            dev)
-              subscription_id="$AZURE_DEV_SUBSCRIPTION_ID"
-              client_id="$AZURE_DEV_CLIENT_ID"
-              ;;
             sit)
               subscription_id="$AZURE_SIT_SUBSCRIPTION_ID"
               client_id="$AZURE_SIT_CLIENT_ID"
@@ -865,7 +860,7 @@ jobs:
               subscription_id="$AZURE_UAT_SUBSCRIPTION_ID"
               client_id="$AZURE_UAT_CLIENT_ID"
               ;;
-            prod)
+            prd)
               subscription_id="$AZURE_PROD_SUBSCRIPTION_ID"
               client_id="$AZURE_PROD_CLIENT_ID"
               ;;
