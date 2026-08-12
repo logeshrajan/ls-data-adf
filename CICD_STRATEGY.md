@@ -18,6 +18,7 @@ One long-lived branch only:
 | `main` | Always reflects exactly what is in PROD. | Pipeline auto-merges after PROD succeeds |
 
 Feature and fix branches are short-lived. They are **never manually merged** — the pipeline merges them to `main` automatically after PROD approval.
+After confirming the PR has merged successfully, delete the remote feature or fix branch manually.
 
 ---
 
