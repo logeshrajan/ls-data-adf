@@ -7,10 +7,10 @@ run-name: >-
 
 # -----------------------------------------------------------------------------
 # Triggers
-#   pull_request to main  ?  SIT (approval)  ?  UAT (approval)
-#                         ?  PROD (approval)  ?  auto-merge to main
-#   DEV is managed by ADF Studio Publish � not by this pipeline.
-#   workflow_dispatch     ?  any environment including DR (manual, single-stage)
+#   pull_request to main  -> SIT (approval)  -> UAT (approval)
+#                         -> PROD (approval) -> auto-merge to main
+#   DEV is managed by ADF Studio Publish - not by this pipeline.
+#   workflow_dispatch     -> any environment including DR (manual, single-stage)
 # -----------------------------------------------------------------------------
 on:
   pull_request:
@@ -46,9 +46,9 @@ env:
 jobs:
 
   # ---------------------------------------------------------------------------
-  #  CI/CD � BUILD
+  #  CI/CD - BUILD
   #  Exports the ARM template once from the DEV factory definition.
-  #  SIT, UAT, and PROD all share this exact artifact � snapshot guarantee.
+  #  SIT, UAT, and PROD all share this exact artifact - snapshot guarantee.
   #  DEV is deployed separately via ADF Studio Publish, not by this pipeline.
   # ---------------------------------------------------------------------------
   build:
@@ -67,7 +67,7 @@ jobs:
         run: npm install
         working-directory: ${{ env.ADF_RESOURCES_PATH }}
 
-      - name: Export ARM template (source � DEV factory definition)
+      - name: Export ARM template (source - DEV factory definition)
         shell: bash
         env:
           AZURE_DEV_SUBSCRIPTION_ID: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
@@ -75,7 +75,7 @@ jobs:
           AZURE_DEV_DATA_FACTORY: ${{ vars.AZURE_DEV_DATA_FACTORY }}
         run: |
           set -euo pipefail
-          # ARM export reads local JSON files only � no Azure credentials required.
+          # ARM export reads local JSON files only - no Azure credentials required.
           # Per-environment values (factory name, IR names, etc.) are patched
           # by each deploy stage's override files at deployment time.
           adf_id="/subscriptions/$AZURE_DEV_SUBSCRIPTION_ID/resourceGroups/$AZURE_DEV_RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$AZURE_DEV_DATA_FACTORY"
@@ -118,7 +118,7 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  #  CI/CD � SIT  (approval gate)
+  #  CI/CD - SIT  (approval gate)
   #  SIT lead / tech lead must approve. Also verifies the branch is rebased
   #  onto the latest main before allowing entry to UAT.
   #  Queued globally: one PR in SIT at a time across all concurrent PRs.
@@ -318,7 +318,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists - ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -347,7 +347,7 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  #  CI/CD � UAT  (approval gate)
+  #  CI/CD - UAT  (approval gate)
   #  QA lead / business analyst must approve. Runs after SIT succeeds.
   #  Queued globally: only one PR in UAT at a time across all concurrent PRs.
   #  The SIT approver must confirm the branch is rebased before this runs.
@@ -547,7 +547,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists - ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -576,7 +576,7 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  #  CI/CD � PROD  (approval gate)
+  #  CI/CD - PROD  (approval gate)
   #  Release manager must approve. Runs after UAT succeeds.
   #  Queued globally: never cancels a run that may be mid-deployment.
   #  Auto-merges the PR to main after a successful deployment.
@@ -776,7 +776,7 @@ jobs:
             if echo "$deploy_output" | grep -qi '"code":"InvalidResourceRequest"' && \
                echo "$deploy_output" | grep -qi "ManagedPrivateEndpoint" && \
                echo "$deploy_output" | grep -qi "already exist"; then
-              echo "Warning: ManagedPrivateEndpoint already exists � ignoring idempotent error."
+              echo "Warning: ManagedPrivateEndpoint already exists - ignoring idempotent error."
             else
               echo "ERROR: Deployment failed."
               exit "$deploy_exit"
@@ -809,12 +809,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Pipeline is the only entity that merges to main � never done manually.
+          # Pipeline is the only entity that merges to main - never done manually.
           gh pr merge ${{ github.event.pull_request.number }} --merge --delete-branch
 
 
   # ---------------------------------------------------------------------------
-  #  MANUAL � workflow_dispatch
+  #  MANUAL - workflow_dispatch
   #  Deploys to any environment (including DR) on demand.
   #  Exports ARM template from the target environment's factory definition,
   #  then runs the full deploy pipeline in a single job.
