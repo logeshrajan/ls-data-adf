@@ -6,7 +6,7 @@
 feature/* , fix/*
       │
       ▼  (PR + code review)
-    main  ──── PR triggers ──→  SIT (approval) ──→  UAT (approval) ──→  PROD (approval) ──→  auto-merge
+          main  ──→  CI build/validate  ──→  SIT (approval)  ──→  UAT (approval)  ──→  PROD (approval)  ──→  auto-merge
 ```
 
 > DEV is deployed by the developer directly via **ADF Studio Publish** — not by this pipeline.
@@ -26,12 +26,14 @@ Feature and fix branches are short-lived. They are **never manually merged** —
 ### On PR opened or updated against `main`
 
 ```
-SIT  ──approval──▶  [rebase check]  ──▶  UAT  ──approval──▶  PROD  ──approval──▶  auto-merge to main
- ▲                                         ▲                    ▲
-SIT lead /                           QA lead / BA        Release manager
-tech lead
+CI build + validation  ──success──▶  SIT  ──approval──▶  UAT  ──approval──▶  PROD  ──approval──▶  auto-merge
+                                ▲                   ▲                    ▲
+                           SIT lead /          QA lead / BA        Release manager
+                           tech lead
 ```
 
+- **CI**: runs for every PR commit, exports and validates the ARM template, and publishes an immutable artifact. A newer commit cancels an older CI build for the same PR.
+- **CD**: starts only after CI succeeds and downloads the artifact from that exact CI run.
 - **DEV**: deployed by the developer via ADF Studio Publish before raising the PR. Not part of this pipeline.
 - **SIT**: first pipeline stage. Pauses for SIT lead / tech lead approval. Approver also checks whether the branch needs a rebase before approving.
 - **UAT**: pauses for QA lead / business analyst approval. At most one PR can be in UAT at a time.
@@ -44,7 +46,7 @@ tech lead
 | Environment | Triggered by | Auto or Approval | Who approves |
 |---|---|---|---|
 | DEV | ADF Studio Publish (manual) | **Developer** | Developer |
-| SIT | PR opened / updated | **Approval** | SIT lead / tech lead |
+| SIT | successful PR CI run | **Approval** | SIT lead / tech lead |
 | UAT | after SIT passes | **Approval** | QA lead / business analyst |
 | PROD | after UAT passes | **Approval** | Release manager |
 
@@ -52,7 +54,7 @@ tech lead
 GitHub pauses the run and notifies the configured reviewers. The approver goes to the workflow run in GitHub Actions and clicks **Approve** or **Reject**.
 
 - **Approve** → deployment proceeds immediately
-- **Reject** → run fails cleanly. Developer pushes a fix to the same PR branch — pipeline re-runs from DEV.
+- **Reject** → run fails cleanly. Developer pushes a fix to the same PR branch — the process restarts from CI.
 
 ---
 
@@ -68,7 +70,7 @@ git rebase origin/main
 git push --force-with-lease origin feature/<branch-name>
 ```
 
-This replays the developer's commits on top of the latest `main`, so the deployment snapshot includes all previous PROD deployments. The pipeline re-triggers automatically from DEV after the push.
+This replays the developer's commits on top of the latest `main`, so the deployment snapshot includes all previous PROD deployments. CI re-triggers automatically after the push.
 
 **Why this matters**: ADF ARM deployments are incremental — they do not delete other workstreams' resources. But if two PRs both modify a shared resource (e.g., a linked service), whichever deploys last wins. The rebase ensures the snapshot going to PROD is always the most up-to-date version of shared resources.
 
@@ -92,7 +94,7 @@ DEV has no concurrency rules — it is managed by ADF Studio Publish, outside th
 
 ## Snapshot Guarantee
 
-When a pipeline run starts on a PR, GitHub locks the commit SHA. Every stage of that run — SIT, UAT, PROD — deploys the **exact same snapshot**. Pushing a new commit to the PR re-triggers the pipeline from SIT with a new snapshot.
+CI locks the PR commit SHA and publishes its ARM artifact. The downstream CD run downloads that exact artifact, and every stage — SIT, UAT, PROD — deploys the **same snapshot**. Pushing a new commit starts a new CI run and, after CI succeeds, a new CD run from SIT. Each CD stage verifies that its SHA is still the latest PR commit before deployment.
 
 Combined with the rebase rule, the snapshot that reaches PROD always includes everything already in `main` and is consistent across all stages.
 
@@ -108,7 +110,8 @@ Combined with the rebase rule, the snapshot that reaches PROD always includes ev
 3. Develop and commit locally; use ADF Studio Publish to test in DEV
 4. Open PR against main when DEV testing is complete
 5. Code review → approved
-6. Pipeline auto-triggers:
+6. CI builds and validates the ARM artifact
+7. Successful CI automatically starts CD:
      SIT gate: SIT lead checks rebase, then approves
      UAT gate: QA approves after testing
      PROD gate: release manager approves
@@ -172,7 +175,7 @@ ADF Studio must be configured to use `main` as the collaboration branch. Develop
 
 ## Manual Re-deployment (workflow_dispatch)
 
-For emergency or ad-hoc deployments without raising a PR. Go to GitHub → Actions → **ADF CI/CD Pipeline** → **Run workflow**, select the environment, and click Run.
+For emergency or ad-hoc deployments without raising a PR. Go to GitHub → Actions → **ADF CD Pipeline** → **Run workflow**, select the environment, and click Run.
 
 | Available environment | When to use |
 |---|---|
